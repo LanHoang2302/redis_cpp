@@ -99,6 +99,7 @@ private:
     size_t                    n_shards_;
     std::unique_ptr<TtlManager> ttl_mgr_;
     AofWriter*                aof_{nullptr};
+    mutable std::mutex        mutation_mu_;
 
     // Stats
     mutable std::atomic<uint64_t> stat_set_{0};

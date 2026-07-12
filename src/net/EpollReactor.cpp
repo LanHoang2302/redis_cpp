@@ -172,10 +172,6 @@ void EpollReactor::run() {
                         for (ssize_t j = 0; j < bytes_read; ++j) {
                             if (buf[j] == 'S') {
                                 stop_loop = true;
-                            } else if (buf[j] == 'W') {
-                                process_pending_writes();
-                            } else if (buf[j] == 'C') {
-                                process_completed_commands();
                             }
                         }
                     } else {
@@ -188,6 +184,10 @@ void EpollReactor::run() {
                         break; // EOF or error
                     }
                 }
+                // Always process queues on any wakeup signal
+                process_pending_writes();
+                process_completed_commands();
+
                 if (stop_loop) {
                     running_.store(false, std::memory_order_release);
                     break;
@@ -221,6 +221,10 @@ void EpollReactor::run() {
             if (is_read)  handle_read(fd);
             if (is_write) handle_write(fd);
         }
+
+        // Always drain pending writes and completed commands at the end of each iteration
+        process_pending_writes();
+        process_completed_commands();
 
         // Idle timeout scan (at most once per second)
         if (cfg_.idle_timeout_s > 0) {

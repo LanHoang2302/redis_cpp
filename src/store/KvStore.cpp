@@ -74,6 +74,7 @@ bool KvStore::set_internal(std::string_view key, std::string_view value,
 }
 
 bool KvStore::set(std::string_view key, std::string_view value) {
+    std::lock_guard mut_lock(mutation_mu_);
     stat_set_.fetch_add(1, std::memory_order_relaxed);
     if (aof_) aof_->log_set(key, value);
     return set_internal(key, value, -1);
@@ -84,12 +85,14 @@ bool KvStore::set_ex(std::string_view key, std::string_view value,
 {
     if (ttl_s <= 0) return false;
     int64_t expire_at = epoch_ms() + ttl_s * 1000;
+    std::lock_guard mut_lock(mutation_mu_);
     stat_set_.fetch_add(1, std::memory_order_relaxed);
     if (aof_) aof_->log_set_ex(key, value, expire_at);
     return set_internal(key, value, expire_at);
 }
 
 bool KvStore::set_absolute(std::string_view key, std::string_view value, int64_t expire_at_ms) {
+    std::lock_guard mut_lock(mutation_mu_);
     stat_set_.fetch_add(1, std::memory_order_relaxed);
     if (aof_) aof_->log_set_ex(key, value, expire_at_ms);
     return set_internal(key, value, expire_at_ms);
@@ -134,6 +137,7 @@ std::optional<std::string> KvStore::get(std::string_view key) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool KvStore::del(std::string_view key) {
+    std::lock_guard mut_lock(mutation_mu_);
     stat_del_.fetch_add(1, std::memory_order_relaxed);
     if (aof_) aof_->log_del(key);
 
@@ -149,6 +153,7 @@ bool KvStore::del(std::string_view key) {
 bool KvStore::expire(std::string_view key, int64_t ttl_s) {
     if (ttl_s <= 0) return false;
 
+    std::lock_guard mut_lock(mutation_mu_);
     auto& shard = shard_for(key);
     int64_t expire_at = epoch_ms() + ttl_s * 1000;
 
@@ -172,6 +177,7 @@ bool KvStore::expire(std::string_view key, int64_t ttl_s) {
 }
 
 bool KvStore::expire_at(std::string_view key, int64_t expire_at_ms) {
+    std::lock_guard mut_lock(mutation_mu_);
     auto& shard = shard_for(key);
 
     std::unique_lock lock(shard.mu);
