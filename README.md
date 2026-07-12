@@ -8,11 +8,11 @@
 |---------|---------------|
 | **I/O Model** | Linux `epoll` & macOS `kqueue` edge-triggered + Reactor pattern |
 | **Concurrency** | Asynchronous FIFO Thread pool + **Actor-like sequential command queue** per connection |
-| **Protocol** | Full RESP (both multi-bulk arrays and inline) |
+| **Protocol** | RESP subset (inline commands and multibulk requests) |
 | **Storage** | Sharded `std::unordered_map` + `std::shared_mutex` (SWMR) |
 | **TTL** | Min-heap (`std::priority_queue`) + background expiry thread (wait-on-earliest-deadline CV) |
 | **Persistence** | AOF (Append-Only File) using absolute millisecond timestamps (`PXAT`/`PEXPIREAT`) |
-| **Safety** | **Zero-data-race** architecture (reactor owns all connection memory; worker communications routed via stop_pipe wakeup) |
+| **Safety** | Thread-safe connection model (reactor owns connection map; worker communication routed via non-blocking wakeup pipe) |
 | **Testing** | Google Test unit tests + Python integration tests (pipelining, disconnects, restart recovery) |
 | **Benchmark** | `redis-benchmark` compatible |
 
@@ -169,7 +169,7 @@ To prevent threads from accessing a partially destroyed reactor on graceful shut
 |---------|----------------|-----------------|
 | **Memory safety** | Manual malloc/free | RAII, move-only socket wrapper, smart pointers |
 | **I/O multiplexing** | epoll only (Linux only) | Transparent epoll (Linux) + kqueue (macOS) |
-| **Thread safety** | Global locks, data races | Sharded locks + Wakeup pipe event queue (Zero-data-race) |
+| **Thread safety** | Global locks, data races | Sharded locks + Wakeup pipe (Safe reactor connection map ownership) |
 | **Execution order** | Pipelined commands raced | Strict FIFO ordered connection command queue (Actor pattern) |
 | **TTL mechanism** | Periodic linear O(N) scan | Min-heap O(log N) CV wait deadline scheduler |
 | **AOF Recovery** | ❌ None | ✅ Absolute PXAT replay (no duplicate writes) |

@@ -67,8 +67,7 @@ echo "── SET with EX 10 (TTL) ───────────────�
 redis-benchmark -h "$HOST" -p "$PORT" -c "$CLIENTS" -n "$REQUESTS" \
     --csv \
     -r 1000000 \
-    -d "$DATA_SIZE" \
-    SET __key__ __value__ EX 10
+    SET key:__rand_int__ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx EX 10
 
 echo ""
 

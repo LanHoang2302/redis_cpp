@@ -173,10 +173,10 @@ int main(int argc, char* argv[]) {
         // ── Event loop (blocking) ─────────────────────────────────────────
         reactor->run();
 
-        g_reactor = nullptr;
         // pool goes out of scope here: all worker threads join safely
         // while reactor is still fully alive and allocated on the heap.
     }
+    g_reactor = nullptr;
     // reactor unique_ptr goes out of scope here: destroyed safely with zero running threads!
 
     std::cout << "[main] Shutting down. Bye.\n";

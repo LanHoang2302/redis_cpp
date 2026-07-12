@@ -100,7 +100,8 @@ private:
 
     // RESP framing: split raw bytes in recv_buf into complete frames
     // Puts each complete command's token list into out_cmds
-    void extract_frames(Connection& conn,
+    // Returns false if the connection has been closed/deleted during parsing.
+    bool extract_frames(Connection& conn,
                         std::vector<std::vector<std::string>>& out_cmds);
 
     // Connection table helpers

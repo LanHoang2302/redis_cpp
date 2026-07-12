@@ -75,8 +75,10 @@ EpollReactor::EpollReactor(ReactorConfig cfg, ThreadPool& pool)
     // Create stop pipe
     if (::pipe(stop_pipe_) < 0) throw std::runtime_error(strerror(errno));
     {
-        int fl = ::fcntl(stop_pipe_[0], F_GETFL, 0);
-        ::fcntl(stop_pipe_[0], F_SETFL, fl | O_NONBLOCK);
+        int fl0 = ::fcntl(stop_pipe_[0], F_GETFL, 0);
+        ::fcntl(stop_pipe_[0], F_SETFL, fl0 | O_NONBLOCK);
+        int fl1 = ::fcntl(stop_pipe_[1], F_GETFL, 0);
+        ::fcntl(stop_pipe_[1], F_SETFL, fl1 | O_NONBLOCK);
     }
 
     // Register listen socket and stop pipe read-end
@@ -142,15 +144,27 @@ void EpollReactor::run() {
             // Wakeup / Stop pipe notification
             if (fd == stop_pipe_[0]) {
                 char buf[128];
-                ssize_t bytes_read = ::read(stop_pipe_[0], buf, sizeof(buf));
                 bool stop_loop = false;
-                for (ssize_t j = 0; j < bytes_read; ++j) {
-                    if (buf[j] == 'S') {
-                        stop_loop = true;
-                    } else if (buf[j] == 'W') {
-                        process_pending_writes();
-                    } else if (buf[j] == 'C') {
-                        process_completed_commands();
+                for (;;) {
+                    ssize_t bytes_read = ::read(stop_pipe_[0], buf, sizeof(buf));
+                    if (bytes_read > 0) {
+                        for (ssize_t j = 0; j < bytes_read; ++j) {
+                            if (buf[j] == 'S') {
+                                stop_loop = true;
+                            } else if (buf[j] == 'W') {
+                                process_pending_writes();
+                            } else if (buf[j] == 'C') {
+                                process_completed_commands();
+                            }
+                        }
+                    } else {
+                        if (bytes_read < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                            break; // drained completely
+                        }
+                        if (bytes_read < 0 && errno == EINTR) {
+                            continue; // retry
+                        }
+                        break; // EOF or error
                     }
                 }
                 if (stop_loop) {
@@ -287,7 +301,9 @@ void EpollReactor::handle_read(int fd) {
 
     // Parse complete RESP frames from buffer
     std::vector<std::vector<std::string>> cmds;
-    extract_frames(*conn, cmds);
+    if (!extract_frames(*conn, cmds)) {
+        return; // Connection was closed during parsing, return immediately!
+    }
 
     // Queue commands for sequential execution
     for (auto& args : cmds) {
@@ -401,7 +417,7 @@ void EpollReactor::dispatch_next_command(Connection* conn) {
 
     conn->processing() = true;
     auto args = std::move(conn->command_queue().front());
-    conn->command_queue().erase(conn->command_queue().begin());
+    conn->command_queue().pop_front();
 
     pool_.enqueue([this, fd = conn->fd(), gen = conn->generation(), args = std::move(args)]() mutable {
         cfg_.on_message(fd, gen, std::move(args));
@@ -430,12 +446,13 @@ void EpollReactor::check_idle() {
 // extract_frames — parse RESP frames from recv buffer
 // ─────────────────────────────────────────────────────────────────────────────
 
-void EpollReactor::extract_frames(Connection& conn,
+bool EpollReactor::extract_frames(Connection& conn,
                                   std::vector<std::vector<std::string>>& out_cmds)
 {
     auto& buf = conn.recv_buf();
 
     size_t consumed = 0;
+    bool alive = true;
     while (consumed < buf.size()) {
         std::string_view data(buf.data() + consumed, buf.size() - consumed);
 
@@ -449,14 +466,16 @@ void EpollReactor::extract_frames(Connection& conn,
         } else {
             // Parse error → close connection
             handle_close(conn.fd());
-            return;
+            alive = false;
+            break;
         }
     }
 
-    // Compact buffer: remove consumed bytes
-    if (consumed > 0) {
+    // Compact buffer: remove consumed bytes if connection is still alive
+    if (alive && consumed > 0) {
         buf.erase(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(consumed));
     }
+    return alive;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

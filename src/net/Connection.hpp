@@ -15,6 +15,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <deque>
 
 namespace net {
 
@@ -88,7 +89,7 @@ public:
     }
 
     // ── Command queue for sequential execution ──────────────────────
-    std::vector<std::vector<std::string>>& command_queue() noexcept { return command_queue_; }
+    std::deque<std::vector<std::string>>& command_queue() noexcept { return command_queue_; }
     bool& processing() noexcept { return processing_; }
 
 private:
@@ -106,8 +107,8 @@ private:
     size_t             send_offset_{0};
 
     // Command execution queue — reactor-only, no locks needed
-    std::vector<std::vector<std::string>> command_queue_;
-    bool                                  processing_{false};
+    std::deque<std::vector<std::string>> command_queue_;
+    bool                                 processing_{false};
 };
 
 } // namespace net
