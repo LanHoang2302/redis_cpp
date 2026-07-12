@@ -85,7 +85,7 @@ bool KvStore::set_ex(std::string_view key, std::string_view value,
     if (ttl_s <= 0) return false;
     int64_t expire_at = epoch_ms() + ttl_s * 1000;
     stat_set_.fetch_add(1, std::memory_order_relaxed);
-    if (aof_) aof_->log_set_ex(key, value, ttl_s);
+    if (aof_) aof_->log_set_ex(key, value, expire_at);
     return set_internal(key, value, expire_at);
 }
 
@@ -158,6 +158,8 @@ bool KvStore::expire(std::string_view key, int64_t ttl_s) {
 
     it->second.expire_at_ms = expire_at;
     lock.unlock();
+
+    if (aof_) aof_->log_expire(key, expire_at);
 
     if (ttl_mgr_) ttl_mgr_->schedule(std::string(key), expire_at);
     return true;

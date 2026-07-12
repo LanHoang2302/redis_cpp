@@ -98,7 +98,7 @@ EpollReactor::~EpollReactor() {
 
 void EpollReactor::stop() noexcept {
     if (stop_pipe_[1] >= 0) {
-        char b = 1;
+        char b = 'S';
         (void)::write(stop_pipe_[1], &b, 1);
     }
 }
@@ -139,10 +139,25 @@ void EpollReactor::run() {
             int fd = events[i].data.fd;
 #endif
 
-            // Stop signal
+            // Wakeup / Stop pipe notification
             if (fd == stop_pipe_[0]) {
-                running_.store(false, std::memory_order_release);
-                break;
+                char buf[128];
+                ssize_t bytes_read = ::read(stop_pipe_[0], buf, sizeof(buf));
+                bool stop_loop = false;
+                for (ssize_t j = 0; j < bytes_read; ++j) {
+                    if (buf[j] == 'S') {
+                        stop_loop = true;
+                    } else if (buf[j] == 'W') {
+                        process_pending_writes();
+                    } else if (buf[j] == 'C') {
+                        process_completed_commands();
+                    }
+                }
+                if (stop_loop) {
+                    running_.store(false, std::memory_order_release);
+                    break;
+                }
+                continue;
             }
 
             // New connection
@@ -274,13 +289,14 @@ void EpollReactor::handle_read(int fd) {
     std::vector<std::vector<std::string>> cmds;
     extract_frames(*conn, cmds);
 
-    // Dispatch each command to thread pool
-    uint64_t gen = conn->generation();
+    // Queue commands for sequential execution
     for (auto& args : cmds) {
         if (args.empty()) continue;
-        pool_.enqueue([this, fd, gen, args = std::move(args)]() mutable {
-            cfg_.on_message(fd, gen, std::move(args));
-        });
+        conn->command_queue().push_back(std::move(args));
+    }
+
+    if (!conn->command_queue().empty() && !conn->processing()) {
+        dispatch_next_command(conn);
     }
 }
 
@@ -321,25 +337,76 @@ void EpollReactor::handle_close(int fd) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool EpollReactor::send(int fd, uint64_t gen, const std::string& data) {
-    auto it = conns_.find(fd);
-    if (it == conns_.end()) return false;
-
-    Connection* conn = it->second.get();
-    if (!conn->alive() || conn->generation() != gen) return false;
-
-    bool ok = conn->send_enqueue(data);
-    if (!ok) return false;
-
-    // Try immediate flush; if incomplete, arm EPOLLOUT
-    int r = conn->flush(fd);
-    if (r == 1) {
-        // Still has data → enable EPOLLOUT so reactor drains it
-        epoll_mod(fd, EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP);
-    } else if (r == -1) {
-        handle_close(fd);
-        return false;
+    {
+        std::lock_guard lock(pending_writes_mu_);
+        pending_writes_.push_back({fd, gen, data});
     }
+    char b = 'W';
+    (void)::write(stop_pipe_[1], &b, 1);
     return true;
+}
+
+void EpollReactor::notify_command_complete(int fd, uint64_t gen) {
+    {
+        std::lock_guard lock(completed_commands_mu_);
+        completed_commands_.push_back({fd, gen});
+    }
+    char b = 'C';
+    (void)::write(stop_pipe_[1], &b, 1);
+}
+
+void EpollReactor::process_pending_writes() {
+    std::vector<PendingWrite> writes;
+    {
+        std::lock_guard lock(pending_writes_mu_);
+        writes.swap(pending_writes_);
+    }
+
+    for (const auto& w : writes) {
+        Connection* conn = get_conn(w.fd);
+        if (!conn || !conn->alive() || conn->generation() != w.gen) continue;
+
+        bool ok = conn->send_enqueue(w.data);
+        if (!ok) continue;
+
+        int r = conn->flush(w.fd);
+        if (r == 1) {
+            epoll_mod(w.fd, EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP);
+        } else if (r == -1) {
+            handle_close(w.fd);
+        }
+    }
+}
+
+void EpollReactor::process_completed_commands() {
+    std::vector<CommandComplete> completes;
+    {
+        std::lock_guard lock(completed_commands_mu_);
+        completes.swap(completed_commands_);
+    }
+
+    for (const auto& c : completes) {
+        Connection* conn = get_conn(c.fd);
+        if (!conn || !conn->alive() || conn->generation() != c.gen) continue;
+
+        conn->processing() = false;
+        if (!conn->command_queue().empty()) {
+            dispatch_next_command(conn);
+        }
+    }
+}
+
+void EpollReactor::dispatch_next_command(Connection* conn) {
+    if (conn->command_queue().empty()) return;
+
+    conn->processing() = true;
+    auto args = std::move(conn->command_queue().front());
+    conn->command_queue().erase(conn->command_queue().begin());
+
+    pool_.enqueue([this, fd = conn->fd(), gen = conn->generation(), args = std::move(args)]() mutable {
+        cfg_.on_message(fd, gen, std::move(args));
+        notify_command_complete(fd, gen);
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

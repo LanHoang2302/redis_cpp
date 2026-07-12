@@ -87,6 +87,10 @@ public:
         return send_offset_ < send_buf_.size();
     }
 
+    // ── Command queue for sequential execution ──────────────────────
+    std::vector<std::vector<std::string>>& command_queue() noexcept { return command_queue_; }
+    bool& processing() noexcept { return processing_; }
+
 private:
     int      fd_;
     uint64_t generation_;
@@ -100,6 +104,10 @@ private:
     mutable std::mutex send_mu_;
     std::vector<char>  send_buf_;
     size_t             send_offset_{0};
+
+    // Command execution queue — reactor-only, no locks needed
+    std::vector<std::vector<std::string>> command_queue_;
+    bool                                  processing_{false};
 };
 
 } // namespace net

@@ -58,19 +58,26 @@ void AofWriter::log_set(std::string_view key, std::string_view value) {
 }
 
 void AofWriter::log_set_ex(std::string_view key, std::string_view value,
-                            int64_t ttl_s)
+                            int64_t expire_at_ms)
 {
-    // *5\r\n$3\r\nSET\r\n...$2\r\nEX\r\n$<N>\r\n<secs>\r\n
-    std::string secs = std::to_string(ttl_s);
+    // *5\r\n$3\r\nSET\r\n...$4\r\nPXAT\r\n$<N>\r\n<ms>\r\n
+    std::string ms = std::to_string(expire_at_ms);
     std::string cmd  = "*5\r\n"
                      + bulk("SET") + bulk(key) + bulk(value)
-                     + bulk("EX") + bulk(secs);
+                     + bulk("PXAT") + bulk(ms);
     write_resp(cmd);
 }
 
 void AofWriter::log_del(std::string_view key) {
     // *2\r\n$3\r\nDEL\r\n$K\r\n<key>\r\n
     std::string cmd = "*2\r\n" + bulk("DEL") + bulk(key);
+    write_resp(cmd);
+}
+
+void AofWriter::log_expire(std::string_view key, int64_t expire_at_ms) {
+    // *3\r\n$9\r\nPEXPIREAT\r\n$K\r\n<key>\r\n$<N>\r\n<ms>\r\n
+    std::string ms = std::to_string(expire_at_ms);
+    std::string cmd = "*3\r\n" + bulk("PEXPIREAT") + bulk(key) + bulk(ms);
     write_resp(cmd);
 }
 
@@ -130,7 +137,8 @@ void AofWriter::fsync_loop() {
 int64_t AofWriter::replay(const std::string& path,
                            SetFn   set_fn,
                            SetExFn set_ex_fn,
-                           DelFn   del_fn)
+                           DelFn   del_fn,
+                           ExpireFn expire_fn)
 {
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) return 0; // No AOF yet is fine
@@ -191,14 +199,18 @@ int64_t AofWriter::replay(const std::string& path,
             if (args.size() == 3) {
                 set_fn(args[1], args[2]);
                 ++count;
-            } else if (args.size() == 5 && args[3] == "EX") {
-                int64_t ttl = 0;
-                try { ttl = std::stoll(args[4]); } catch(...) {}
-                if (ttl > 0) { set_ex_fn(args[1], args[2], ttl); ++count; }
+            } else if (args.size() == 5 && args[3] == "PXAT") {
+                int64_t expire_at_ms = 0;
+                try { expire_at_ms = std::stoll(args[4]); } catch(...) {}
+                if (expire_at_ms > 0) { set_ex_fn(args[1], args[2], expire_at_ms); ++count; }
             }
         } else if (cmd == "DEL" && args.size() == 2) {
             del_fn(args[1]);
             ++count;
+        } else if (cmd == "PEXPIREAT" && args.size() == 3) {
+            int64_t expire_at_ms = 0;
+            try { expire_at_ms = std::stoll(args[2]); } catch(...) {}
+            if (expire_at_ms > 0) { expire_fn(args[1], expire_at_ms); ++count; }
         }
     }
 

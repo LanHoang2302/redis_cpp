@@ -61,8 +61,7 @@ void TtlManager::run() {
         if (diff_ms > 0) {
             // Sleep until next expiry (or interrupted)
             cv_.wait_for(lock, std::chrono::milliseconds(diff_ms), [this, next_ms] {
-                return stop_.load() ||
-                       (!heap_.empty() && heap_.top().expire_at_ms <= now_ms());
+                return stop_.load() || heap_.empty() || heap_.top().expire_at_ms < next_ms;
             });
         }
 

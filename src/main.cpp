@@ -107,11 +107,25 @@ int main(int argc, char* argv[]) {
             [&](std::string_view k, std::string_view v) {
                 return store->set(k, v);
             },
-            [&](std::string_view k, std::string_view v, int64_t ttl) {
-                return store->set_ex(k, v, ttl);
+            [&](std::string_view k, std::string_view v, int64_t expire_at_ms) {
+                int64_t now = store::KvStore::epoch_ms();
+                if (expire_at_ms <= now) return false;
+                int64_t remaining_s = (expire_at_ms - now) / 1000;
+                if (remaining_s <= 0) remaining_s = 1;
+                return store->set_ex(k, v, remaining_s);
             },
             [&](std::string_view k) {
                 return store->del(k);
+            },
+            [&](std::string_view k, int64_t expire_at_ms) {
+                int64_t now = store::KvStore::epoch_ms();
+                if (expire_at_ms <= now) {
+                    store->del(k);
+                    return true;
+                }
+                int64_t remaining_s = (expire_at_ms - now) / 1000;
+                if (remaining_s <= 0) remaining_s = 1;
+                return store->expire(k, remaining_s);
             }
         );
     }

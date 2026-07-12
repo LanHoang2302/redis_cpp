@@ -47,11 +47,14 @@ public:
     // Append a SET command
     void log_set(std::string_view key, std::string_view value);
 
-    // Append a SET with EX (TTL in seconds)
-    void log_set_ex(std::string_view key, std::string_view value, int64_t ttl_s);
+    // Append a SET with EX (absolute expiration in milliseconds)
+    void log_set_ex(std::string_view key, std::string_view value, int64_t expire_at_ms);
 
     // Append a DEL command
     void log_del(std::string_view key);
+
+    // Append a PEXPIREAT command
+    void log_expire(std::string_view key, int64_t expire_at_ms);
 
     // Replay the AOF file into a KvStore.
     // Called once at startup before accepting connections.
@@ -60,11 +63,13 @@ public:
                                        std::string_view value)>;
     using SetExFn = std::function<bool(std::string_view key,
                                        std::string_view value,
-                                       int64_t ttl_s)>;
+                                       int64_t expire_at_ms)>;
     using DelFn   = std::function<bool(std::string_view key)>;
+    using ExpireFn = std::function<bool(std::string_view key,
+                                        int64_t expire_at_ms)>;
 
     int64_t replay(const std::string& path,
-                   SetFn set_fn, SetExFn set_ex_fn, DelFn del_fn);
+                   SetFn set_fn, SetExFn set_ex_fn, DelFn del_fn, ExpireFn expire_fn);
 
 private:
     void write_resp(const std::string& cmd);
