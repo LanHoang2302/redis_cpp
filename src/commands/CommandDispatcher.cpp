@@ -133,6 +133,20 @@ public:
     }
 };
 
+// ─── PERSIST ──────────────────────────────────────────────────────────────────
+class PersistCommand final : public Command {
+public:
+    std::string_view name() const noexcept override { return "PERSIST"; }
+    int min_args() const noexcept override { return 2; }
+    int max_args() const noexcept override { return 2; }
+
+    std::string execute(const std::vector<std::string>& args,
+                        store::KvStore& store) override
+    {
+        return R::integer(store.persist(args[1]) ? 1 : 0);
+    }
+};
+
 // ─── PING ─────────────────────────────────────────────────────────────────────
 class PingCommand final : public Command {
 public:
@@ -223,6 +237,7 @@ CommandDispatcher::CommandDispatcher() {
     reg(std::make_unique<DelCommand>());
     reg(std::make_unique<ExpireCommand>());
     reg(std::make_unique<TtlCommand>());
+    reg(std::make_unique<PersistCommand>());
     reg(std::make_unique<PingCommand>());
     reg(std::make_unique<InfoCommand>());
     reg(std::make_unique<KeysCommand>());

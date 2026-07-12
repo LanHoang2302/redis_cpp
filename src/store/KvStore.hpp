@@ -66,6 +66,9 @@ public:
     // Set absolute expiration time (Redis PEXPIREAT semantics)
     bool expire_at(std::string_view key, int64_t expire_at_ms);
 
+    // Remove expiration from a key (Redis PERSIST semantics)
+    bool persist(std::string_view key);
+
     // ── TTL query ────────────────────────────────────────────────────
     // -2 = key does not exist (or expired)
     // -1 = key exists, no expiry
@@ -99,7 +102,7 @@ private:
     size_t                    n_shards_;
     std::unique_ptr<TtlManager> ttl_mgr_;
     AofWriter*                aof_{nullptr};
-    mutable std::mutex        mutation_mu_;
+    mutable std::mutex        mutation_mutex_;
 
     // Stats
     mutable std::atomic<uint64_t> stat_set_{0};

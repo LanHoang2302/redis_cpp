@@ -101,6 +101,18 @@ TEST_F(CommandTest, DbSize) {
     EXPECT_EQ(r2, ":2\r\n");
 }
 
+// ─── PERSIST ──────────────────────────────────────────────────────────────────
+
+TEST_F(CommandTest, Persist) {
+    dispatcher_.dispatch({"SET", "k", "v", "EX", "100"}, store_);
+    EXPECT_GT(std::stoi(dispatcher_.dispatch({"TTL", "k"}, store_).substr(1)), 0);
+    auto p1 = dispatcher_.dispatch({"PERSIST", "k"}, store_);
+    EXPECT_EQ(p1, ":1\r\n");
+    EXPECT_EQ(dispatcher_.dispatch({"TTL", "k"}, store_), ":-1\r\n");
+    auto p2 = dispatcher_.dispatch({"PERSIST", "k"}, store_);
+    EXPECT_EQ(p2, ":0\r\n");
+}
+
 // ─── Error handling ───────────────────────────────────────────────────────────
 
 TEST_F(CommandTest, UnknownCommand) {
