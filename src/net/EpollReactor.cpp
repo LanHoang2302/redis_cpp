@@ -19,6 +19,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <csignal>
 #include <cerrno>
 #include <cstring>
@@ -99,9 +100,29 @@ EpollReactor::~EpollReactor() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void EpollReactor::stop() noexcept {
+    running_.store(false, std::memory_order_release);
     if (stop_pipe_[1] >= 0) {
         char b = 'S';
-        (void)::write(stop_pipe_[1], &b, 1);
+        int attempts = 0;
+        while (attempts++ < 100) {
+            ssize_t n = ::write(stop_pipe_[1], &b, 1);
+            if (n == 1) {
+                break;
+            }
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    struct pollfd pfd{};
+                    pfd.fd = stop_pipe_[1];
+                    pfd.events = POLLOUT;
+                    ::poll(&pfd, 1, 10); // Wait up to 10ms for pipe buffer space
+                    continue;
+                }
+                break; // Unrecoverable pipe error
+            }
+        }
     }
 }
 

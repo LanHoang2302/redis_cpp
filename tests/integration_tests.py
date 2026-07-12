@@ -5,7 +5,21 @@ import time
 import os
 import sys
 
+def get_binary_path():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+    candidates = [
+        os.path.join(project_root, "build", "redis_cpp"),
+        os.path.join(os.getcwd(), "redis_cpp"),
+        os.path.join(os.getcwd(), "build", "redis_cpp")
+    ]
+    for p in candidates:
+        if os.path.exists(p) and os.access(p, os.X_OK):
+            return p
+    return "./build/redis_cpp"
+
 def main():
+    bin_path = get_binary_path()
     port = 6389
     aof_file = "integration_test.aof"
     if os.path.exists(aof_file):
@@ -13,11 +27,12 @@ def main():
 
     print("════════════════════════════════════════════════════════")
     print("  redis_cpp Integration Tests")
+    print(f"  Using binary: {bin_path}")
     print("════════════════════════════════════════════════════════")
 
     # Start server in background
     print("[1/4] Starting server for AOF & Pipelining tests...")
-    server = subprocess.Popen(["./build/redis_cpp", "--port", str(port), "--aof", aof_file])
+    server = subprocess.Popen([bin_path, "--port", str(port), "--aof", aof_file])
     time.sleep(1.5) # Wait for startup
 
     try:
@@ -81,7 +96,7 @@ def main():
 
         # Restart server to replay AOF
         print("   Restarting server to replay AOF...")
-        server = subprocess.Popen(["./build/redis_cpp", "--port", str(port), "--aof", aof_file])
+        server = subprocess.Popen([bin_path, "--port", str(port), "--aof", aof_file])
         time.sleep(1.5)
 
         # Stop server again without any new write commands (should not append replay writes)
@@ -96,7 +111,7 @@ def main():
         print("   ✓ AOF duplication prevention verified!")
 
         # Restart server for verification checks
-        server = subprocess.Popen(["./build/redis_cpp", "--port", str(port), "--aof", aof_file])
+        server = subprocess.Popen([bin_path, "--port", str(port), "--aof", aof_file])
         time.sleep(1.5)
 
         # Connect and verify recovered state
@@ -129,7 +144,7 @@ def main():
     print("[4/4] Testing connection idle timeout...")
     low_timeout_port = 6388
     low_timeout_server = subprocess.Popen([
-        "./build/redis_cpp", 
+        bin_path, 
         "--port", str(low_timeout_port), 
         "--idle-timeout", "2", 
         "--no-aof"

@@ -86,6 +86,11 @@ target_link_libraries(run_tests
 include(GoogleTest)
 gtest_discover_tests(run_tests)
 
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME IntegrationTests
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration_tests.py
+)
+
 # ─── Install ──────────────────────────────────────────────────────────────────
 install(TARGETS redis_cpp DESTINATION bin)
 
