@@ -89,6 +89,12 @@ bool KvStore::set_ex(std::string_view key, std::string_view value,
     return set_internal(key, value, expire_at);
 }
 
+bool KvStore::set_absolute(std::string_view key, std::string_view value, int64_t expire_at_ms) {
+    stat_set_.fetch_add(1, std::memory_order_relaxed);
+    if (aof_) aof_->log_set_ex(key, value, expire_at_ms);
+    return set_internal(key, value, expire_at_ms);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // get
 // ─────────────────────────────────────────────────────────────────────────────
@@ -162,6 +168,28 @@ bool KvStore::expire(std::string_view key, int64_t ttl_s) {
     if (aof_) aof_->log_expire(key, expire_at);
 
     if (ttl_mgr_) ttl_mgr_->schedule(std::string(key), expire_at);
+    return true;
+}
+
+bool KvStore::expire_at(std::string_view key, int64_t expire_at_ms) {
+    auto& shard = shard_for(key);
+
+    std::unique_lock lock(shard.mu);
+    auto it = shard.map.find(std::string(key));
+    if (it == shard.map.end()) return false;
+
+    // Check not already expired
+    if (it->second.expire_at_ms >= 0 && epoch_ms() >= it->second.expire_at_ms) {
+        shard.map.erase(it);
+        return false;
+    }
+
+    it->second.expire_at_ms = expire_at_ms;
+    lock.unlock();
+
+    if (aof_) aof_->log_expire(key, expire_at_ms);
+
+    if (ttl_mgr_) ttl_mgr_->schedule(std::string(key), expire_at_ms);
     return true;
 }
 

@@ -96,8 +96,9 @@ int main(int argc, char* argv[]) {
     }
 
     // ── KV Store ──────────────────────────────────────────────────────
+    // Initialize with aof = nullptr to prevent duplicate logging during replay
     auto store = std::make_unique<store::KvStore>(
-        store::KvStore::DEFAULT_SHARDS, aof.get(), /*enable_ttl=*/true);
+        store::KvStore::DEFAULT_SHARDS, nullptr, /*enable_ttl=*/true);
 
     // ── Replay AOF (restore state from disk) ──────────────────────────
     if (use_aof) {
@@ -110,9 +111,8 @@ int main(int argc, char* argv[]) {
             [&](std::string_view k, std::string_view v, int64_t expire_at_ms) {
                 int64_t now = store::KvStore::epoch_ms();
                 if (expire_at_ms <= now) return false;
-                int64_t remaining_s = (expire_at_ms - now) / 1000;
-                if (remaining_s <= 0) remaining_s = 1;
-                return store->set_ex(k, v, remaining_s);
+                // Recover using exact absolute expiration time!
+                return store->set_absolute(k, v, expire_at_ms);
             },
             [&](std::string_view k) {
                 return store->del(k);
@@ -123,56 +123,62 @@ int main(int argc, char* argv[]) {
                     store->del(k);
                     return true;
                 }
-                int64_t remaining_s = (expire_at_ms - now) / 1000;
-                if (remaining_s <= 0) remaining_s = 1;
-                return store->expire(k, remaining_s);
+                // Recover using exact absolute expiration time!
+                return store->expire_at(k, expire_at_ms);
             }
         );
+        // Attach the active AofWriter after replay is complete!
+        store->set_aof(aof.get());
     }
 
     // ── Command Dispatcher ────────────────────────────────────────────
     auto dispatcher = std::make_unique<commands::CommandDispatcher>();
 
-    // ── Thread Pool ───────────────────────────────────────────────────
+    // ── Thread Pool & Reactor Lifetime ────────────────────────────────
+    // We wrap them in unique_ptr and nested blocks to guarantee that the
+    // thread pool is fully stopped and joined BEFORE the reactor is destroyed.
+    // This prevents worker threads from accessing a partially destroyed reactor.
     size_t n_threads = workers > 0
                        ? static_cast<size_t>(workers)
                        : std::thread::hardware_concurrency();
-    ThreadPool pool(n_threads);
-
     std::cout << "[main] Thread pool: " << n_threads << " workers\n";
 
-    // ── Epoll Reactor ─────────────────────────────────────────────────
-    net::ReactorConfig cfg;
-    cfg.port           = port;
-    cfg.idle_timeout_s = idle_timeout;
-    cfg.on_message = [&](int fd, uint64_t gen, std::vector<std::string> args) {
-        // Normalize command name to uppercase
-        if (!args.empty()) {
-            for (char& c : args[0])
-                c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-        }
-        std::string resp = dispatcher->dispatch(args, *store);
-        // reactor.send is thread-safe
-        // We capture g_reactor; it's set before run()
-        g_reactor->send(fd, gen, resp);
-    };
+    std::unique_ptr<net::EpollReactor> reactor;
+    {
+        ThreadPool pool(n_threads);
+        
+        net::ReactorConfig cfg;
+        cfg.port           = port;
+        cfg.idle_timeout_s = idle_timeout;
+        cfg.on_message = [&](int fd, uint64_t gen, std::vector<std::string> args) {
+            if (!args.empty()) {
+                for (char& c : args[0])
+                    c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            }
+            std::string resp = dispatcher->dispatch(args, *store);
+            g_reactor->send(fd, gen, resp);
+        };
 
-    net::EpollReactor reactor(cfg, pool);
-    g_reactor = &reactor;
+        reactor = std::make_unique<net::EpollReactor>(cfg, pool);
+        g_reactor = reactor.get();
 
-    // ── Signals ───────────────────────────────────────────────────────
-    ::signal(SIGINT,  sig_handler);
-    ::signal(SIGTERM, sig_handler);
+        // ── Signals ───────────────────────────────────────────────────────
+        ::signal(SIGINT,  sig_handler);
+        ::signal(SIGTERM, sig_handler);
 
-    std::cout << "[main] redis_cpp ready on port " << port
-              << " (AOF: " << (use_aof ? aof_path : "disabled") << ")\n"
-              << "  redis-cli -p " << port << "\n";
+        std::cout << "[main] redis_cpp ready on port " << port
+                  << " (AOF: " << (use_aof ? aof_path : "disabled") << ")\n"
+                  << "  redis-cli -p " << port << "\n";
 
-    // ── Event loop (blocking) ─────────────────────────────────────────
-    reactor.run();
+        // ── Event loop (blocking) ─────────────────────────────────────────
+        reactor->run();
 
-    // ── Graceful shutdown ─────────────────────────────────────────────
-    g_reactor = nullptr;
+        g_reactor = nullptr;
+        // pool goes out of scope here: all worker threads join safely
+        // while reactor is still fully alive and allocated on the heap.
+    }
+    // reactor unique_ptr goes out of scope here: destroyed safely with zero running threads!
+
     std::cout << "[main] Shutting down. Bye.\n";
     return 0;
 }

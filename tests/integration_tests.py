@@ -70,13 +70,32 @@ def main():
         assert 5 < ttl_val <= 10, f"TTL value out of expected range: {ttl_val}"
         s.close()
 
-        # Shutdown server gracefully
+        # Shutdown server gracefully (flushes AOF)
         print("   Stopping server to save AOF...")
         server.terminate()
         server.wait()
 
-        # Restart server
+        # Read baseline AOF size after flush
+        with open(aof_file, "rb") as f:
+            aof_content_before = f.read()
+
+        # Restart server to replay AOF
         print("   Restarting server to replay AOF...")
+        server = subprocess.Popen(["./build/redis_cpp", "--port", str(port), "--aof", aof_file])
+        time.sleep(1.5)
+
+        # Stop server again without any new write commands (should not append replay writes)
+        server.terminate()
+        server.wait()
+
+        # Read AOF again; it should be identical (no re-logging during replay)
+        with open(aof_file, "rb") as f:
+            aof_content_after = f.read()
+
+        assert aof_content_before == aof_content_after, f"AOF duplication detected! Before: {len(aof_content_before)} bytes, After: {len(aof_content_after)} bytes."
+        print("   ✓ AOF duplication prevention verified!")
+
+        # Restart server for verification checks
         server = subprocess.Popen(["./build/redis_cpp", "--port", str(port), "--aof", aof_file])
         time.sleep(1.5)
 

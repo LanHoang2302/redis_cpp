@@ -54,9 +54,17 @@ public:
     // Returns true if key existed and was deleted
     bool del(std::string_view key);
 
+    // Set AOF writer dynamically (e.g. to enable it after replay)
+    void set_aof(AofWriter* aof) noexcept { aof_ = aof; }
+
+    // Set key with absolute expiration time (in milliseconds since epoch)
+    bool set_absolute(std::string_view key, std::string_view value, int64_t expire_at_ms);
+
     // Set TTL on existing key (Redis EXPIRE semantics)
-    // Returns true if key exists, false otherwise
     bool expire(std::string_view key, int64_t ttl_s);
+
+    // Set absolute expiration time (Redis PEXPIREAT semantics)
+    bool expire_at(std::string_view key, int64_t expire_at_ms);
 
     // ── TTL query ────────────────────────────────────────────────────
     // -2 = key does not exist (or expired)

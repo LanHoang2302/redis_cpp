@@ -6,24 +6,24 @@
 
 | Feature | Implementation |
 |---------|---------------|
-| **I/O Model** | Linux `epoll` edge-triggered + Reactor pattern |
-| **Concurrency** | Thread pool (worker threads handle commands) |
+| **I/O Model** | Linux `epoll` & macOS `kqueue` edge-triggered + Reactor pattern |
+| **Concurrency** | Asynchronous FIFO Thread pool + **Actor-like sequential command queue** per connection |
 | **Protocol** | Full RESP (both multi-bulk arrays and inline) |
-| **Storage** | Sharded `std::unordered_map` + `std::shared_mutex` |
-| **TTL** | Min-heap (`std::priority_queue`) + background expiry thread |
-| **Persistence** | AOF (Append-Only File) + replay on startup |
-| **Design** | RAII socket wrapper, Command pattern, SOLID principles |
-| **Testing** | Google Test unit tests |
+| **Storage** | Sharded `std::unordered_map` + `std::shared_mutex` (SWMR) |
+| **TTL** | Min-heap (`std::priority_queue`) + background expiry thread (wait-on-earliest-deadline CV) |
+| **Persistence** | AOF (Append-Only File) using absolute millisecond timestamps (`PXAT`/`PEXPIREAT`) |
+| **Safety** | **Zero-data-race** architecture (reactor owns all connection memory; worker communications routed via stop_pipe wakeup) |
+| **Testing** | Google Test unit tests + Python integration tests (pipelining, disconnects, restart recovery) |
 | **Benchmark** | `redis-benchmark` compatible |
 
 ## 🚀 Supported Commands
 
 ```
 PING [message]           — connectivity check
-SET key value [EX sec]   — set key with optional TTL
+SET key value [EX sec]   — set key with optional TTL (persisted as PXAT)
 GET key                  — get value
 DEL key [key ...]        — delete one or more keys
-EXPIRE key seconds       — set TTL on existing key
+EXPIRE key seconds       — set TTL on existing key (persisted as PEXPIREAT)
 TTL key                  — remaining TTL (-1=no expiry, -2=not found)
 INFO                     — server statistics
 DBSIZE                   — number of live keys
@@ -66,65 +66,75 @@ Client
   │
   ▼
 EpollReactor (reactor thread)
-  │  epoll_wait() — EPOLLIN fires
-  │  → drain recv buffer (edge-triggered: loop until EAGAIN)
-  │  → RespParser::parse() → extract complete RESP frames
-  │  → for each frame: ThreadPool::enqueue(job)
+  │  epoll_wait() / kevent() — read event fires
+  │  → Drains socket recv buffer to connection's receive buffer
+  │  → Splits stream into complete RESP frames
+  │  → Enqueues commands to Connection's command queue
+  │  → If not currently executing, pops first command and dispatches to ThreadPool
   │
   ▼
 ThreadPool (worker thread N)
-  │  CommandDispatcher::dispatch(args, store)
-  │  → KvStore::get/set/del/expire/...
-  │  → returns RESP-encoded response string
-  │  → reactor.send(fd, gen, resp)
+  │  Executes CommandDispatcher::dispatch(args, store)
+  │  → Mutex-locked KvStore operations
+  │  → Writes RESP reply to a safe pending-writes queue
+  │  → Writes completion wakeups ('W' for write, 'C' for complete) to stop_pipe_
   │
   ▼
-EpollReactor (reactor thread)
-  │  conn.send_enqueue(data)
-  │  conn.flush(fd)
-  │  → EAGAIN? → arm EPOLLOUT → flush on next writable event
+EpollReactor (reactor thread wakes up)
+  │  → Wrote 'W' (write): flushes data to client (arms EPOLLOUT if partial)
+  │  → Wrote 'C' (complete): sets connection processing = false, dispatches next command
   ▼
 Client
 ```
 
 ## 🔧 Build
 
-**Requirements:** Linux (epoll), GCC 11+ or Clang 13+, CMake 3.20+, internet (for fetching GoogleTest)
+**Requirements:** Linux (epoll) or macOS (kqueue), GCC 11+ or Clang 13+, CMake 3.20+, internet (for fetching GoogleTest)
 
 ```bash
 # Release build
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
+cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
 
 # Debug build (with AddressSanitizer + UBSan)
 cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug
-cmake --build build-debug -j$(nproc)
+cmake --build build-debug -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
 
 # Run server
 ./build/redis_cpp --port 6380 --workers 4
-
-# Connect
-redis-cli -p 6380
 ```
 
 ## 🧪 Tests
 
+Both Google Test unit tests and Python integration tests are supported:
+
 ```bash
-cmake -S . -B build-test
-cmake --build build-test -j$(nproc)
-cd build-test && ctest --output-on-failure
+# Run Unit Tests
+./build/run_tests
+
+# Run Integration Tests (Pipelining, Disconnects, AOF Recovery)
+python3 tests/integration_tests.py
 ```
 
 ## 📊 Benchmark
 
+Ensure the server is running without AOF (`--no-aof`) for clean raw CPU/Memory results:
+
 ```bash
 # Start server
-./build/redis_cpp --port 6380
+./build/redis_cpp --port 6380 --no-aof
 
-# Run benchmark
-chmod +x benchmark/run_bench.sh
+# Run benchmark suite
 ./benchmark/run_bench.sh 6380
 ```
+
+### 📈 Typical Results (macOS, kqueue, 50 clients, 100k requests):
+- **PING (Inline)**: ~30,000 RPS
+- **SET**: ~24,500 RPS
+- **GET**: ~25,400 RPS
+- **SET with EX 10 (TTL)**: ~29,500 RPS
+- **SET (Pipelined 16)**: **~81,300 RPS**
+- **GET (Pipelined 16)**: **~87,400 RPS**
 
 ## ⚙️ CLI Options
 
@@ -138,30 +148,30 @@ chmod +x benchmark/run_bench.sh
 
 ## 🔑 Design Decisions
 
-### Reactor + Thread Pool separation
-The reactor thread only does I/O (epoll_wait, read, write). Business logic runs in the pool. This prevents slow commands from blocking other connections.
+### Actor-like FIFO Connection Queue
+To ensure pipelined commands are executed and responded to in the exact order they are received on each socket connection, each `Connection` maintains an independent command queue. Commands are executed sequentially (one-by-one per connection) by the thread pool, ensuring 100% protocol FIFO order without sacrificing performance.
 
-### RAII everywhere
-- `Socket`: auto-closes fd, move-only
-- `KvStore`: RAII mutex locks via `std::unique_lock` / `std::shared_lock`
-- `ThreadPool`: joins all threads in destructor
-- `TtlManager`/`AofWriter`: stop background threads in destructor
+### Single-Threaded Connection Map Ownership
+To prevent data races between worker threads and the reactor thread when adding/removing connections, the reactor thread holds exclusive ownership of the connection table. Worker threads communicate writing and completion events through a non-blocking pipe (`stop_pipe_`). The reactor thread wakes up, handles the events, and performs socket I/O in a single-threaded loop.
 
-### Lazy + Proactive TTL
-- **Proactive**: `TtlManager` min-heap fires callback when key expires → immediately removed
-- **Lazy**: `KvStore::get()` also checks expiry → defense-in-depth
+### Absolute Expire-At (PXAT/PEXPIREAT) Persistence
+To prevent relative expiration drift and clock issues when replaying the AOF on startup, all relative TTL parameters (like `EX 10` or `expire key 10`) are logged in the AOF as absolute Unix epoch timestamps in milliseconds using `PXAT` and `PEXPIREAT`.
 
-### AOF Recovery
-On startup, `AofWriter::replay()` re-executes all SET/DEL commands from the AOF file, rebuilding the dataset before accepting connections.
+### Dynamic AOF Attachment (No Duplicates)
+During startup replay, the active `AofWriter` is detached (`nullptr`) from `KvStore` so that replayed commands do not trigger new appends to the AOF. The `AofWriter` is dynamically attached to the store only after replay is completed, ensuring AOF file size does not duplicate on restart.
+
+### Nested Stack Lifetime Shutdown
+To prevent threads from accessing a partially destroyed reactor on graceful shutdown, the `ThreadPool` and `EpollReactor` are declared in nested stack lifetimes. During shutdown, the `ThreadPool` destructor executes first, blocking and joining all worker threads safely before the `EpollReactor` goes out of scope and frees its pipe and socket file descriptors.
 
 ## 📈 Upgrades vs. ev_kv_store (C)
 
 | Feature | ev_kv_store (C) | redis_cpp (C++) |
 |---------|----------------|-----------------|
-| Memory safety | Manual malloc/free | RAII, smart pointers |
-| Protocol input | Custom line protocol | Full RESP (multibulk + inline) |
-| TTL mechanism | Background scan (O(n)) | Min-heap (O(log n)) |
-| Persistence | ❌ None | ✅ AOF + replay |
-| Command design | Switch/case dispatch | Command pattern (polymorphic) |
-| Type safety | Void pointers, casts | Templates, std::optional |
-| Mutex type | `pthread_mutex_t` | `std::shared_mutex` (SWMR) |
+| **Memory safety** | Manual malloc/free | RAII, move-only socket wrapper, smart pointers |
+| **I/O multiplexing** | epoll only (Linux only) | Transparent epoll (Linux) + kqueue (macOS) |
+| **Thread safety** | Global locks, data races | Sharded locks + Wakeup pipe event queue (Zero-data-race) |
+| **Execution order** | Pipelined commands raced | Strict FIFO ordered connection command queue (Actor pattern) |
+| **TTL mechanism** | Periodic linear O(N) scan | Min-heap O(log N) CV wait deadline scheduler |
+| **AOF Recovery** | ❌ None | ✅ Absolute PXAT replay (no duplicate writes) |
+| **Command design** | Switch/case dispatch | Command pattern (polymorphic) |
+| **Kiểm thử** | ❌ Cầm tay / Sơ sài | ✅ 47 GTest unit tests + Python integration tests |
